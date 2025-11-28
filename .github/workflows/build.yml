@@ -61,16 +61,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ---------- Rust 설치 (최강 안정 버전) ----------
+      # ---------- Rust 설치 ----------
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      # ---------- Build + Test ----------
+      # ---------- Build + Test (locked 제거!) ----------
       - name: Cargo Build
-        run: cargo build --release --locked
+        run: cargo build --release
 
       - name: Cargo Test
-        run: cargo test --locked
+        run: cargo test
 
       # ---------- Proof Ledger ----------
       - name: Generate Proof Ledger
@@ -82,7 +82,7 @@ jobs:
           echo "Commit: $GITHUB_SHA" >> proof/PROOF-${{ matrix.os }}.txt
           echo "Build-Time: $(date)" >> proof/PROOF-${{ matrix.os }}.txt
 
-      # ---------- SHA256 (Linux/macOS) ----------
+      # ---------- SHA256 (Unix) ----------
       - name: SHA256 Unix
         if: matrix.os != 'windows-latest'
         run: |
