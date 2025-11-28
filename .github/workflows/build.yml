@@ -1,4 +1,4 @@
-name: User-Order-Module Auto Release (3OS)
+name: User-Order Module Stable Auto Release (3OS)
 
 on:
   push:
@@ -9,13 +9,13 @@ permissions:
   contents: write
 
 concurrency:
-  group: user-order-module
+  group: user-can-designate-order
   cancel-in-progress: false
 
 jobs:
-  # ===========================================================
-  # 1) 버전 태그 생성 + 중복 검사
-  # ===========================================================
+  # -----------------------------------------------------------
+  # 1) Version Tag (unique, safe, duplicate-check)
+  # -----------------------------------------------------------
   versioning:
     runs-on: ubuntu-latest
     outputs:
@@ -25,15 +25,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Generate version tag
+      - name: Generate stable tag
         id: tag
         run: |
-          DATE=$(date +"%Y%m%d%H%M%S")
+          DATE=$(date +"%Y%m%d%H%M%S%N")
           TAG="v0.1.${DATE}"
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
-      - name: Check if tag already exists
+      - name: Check tag duplication
         id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           TAG=${{ steps.tag.outputs.tag }}
           if gh release view "$TAG" >/dev/null 2>&1; then
@@ -41,20 +43,18 @@ jobs:
           else
             echo "exists=false" >> $GITHUB_OUTPUT
           fi
-        env:
-          GH_TOKEN: ${{ github.token }}
 
-  # ===========================================================
-  # 2) Rust 3OS Build
-  # ===========================================================
+  # -----------------------------------------------------------
+  # 2) Rust 3OS Build (Stable)
+  # -----------------------------------------------------------
   build:
     needs: versioning
     if: needs.versioning.outputs.exists == 'false'
 
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-      fail-fast: false
 
     runs-on: ${{ matrix.os }}
 
@@ -62,67 +62,64 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Setup Rust
-        uses: actions/setup-rust@v1
+        uses: rust-lang/setup-rust@v1.8.0
         with:
           rust-version: stable
 
-      - name: Build (Release)
-        run: cargo build --release
+      - name: Cargo Build (Release + Locked)
+        run: cargo build --release --locked
 
-      - name: Run Tests
-        run: cargo test --verbose
+      - name: Cargo Test
+        run: cargo test --locked
 
-      # -------------------------
-      # Proof Metadata + SHA256
-      # -------------------------
-      - name: Prepare proof ledger
+      # ---------------- Proof Ledger ----------------
+      - name: Generate ProofLedger
         run: |
           mkdir -p proof
-          echo "User-can-designate-order Proof" > proof/PROOF-${{ matrix.os }}.txt
+          echo "User-can-designate-order Proof Ledger" > proof/PROOF-${{ matrix.os }}.txt
           echo "Tag: ${{ needs.versioning.outputs.new_tag }}" >> proof/PROOF-${{ matrix.os }}.txt
           echo "OS: ${{ matrix.os }}" >> proof/PROOF-${{ matrix.os }}.txt
           echo "Commit: $GITHUB_SHA" >> proof/PROOF-${{ matrix.os }}.txt
           echo "Build-Time: $(date)" >> proof/PROOF-${{ matrix.os }}.txt
 
-      - name: SHA256 checksum
-        shell: bash
+      # ---------------- SHA256 Linux/macOS ----------------
+      - name: SHA256 checksum (Unix)
         if: matrix.os != 'windows-latest'
         run: |
           echo "SHA256 Checksum" > proof/SHA256-${{ matrix.os }}.txt
           sha256sum target/release/* >> proof/SHA256-${{ matrix.os }}.txt
 
+      # ---------------- SHA256 Windows ----------------
       - name: SHA256 checksum (Windows)
         if: matrix.os == 'windows-latest'
         shell: powershell
         run: |
           New-Item -ItemType Directory -Force -Path proof | Out-Null
-          $files = Get-ChildItem target\release\
-          $out = "proof\SHA256-windows.txt"
+          $out = "proof/SHA256-windows.txt"
           "" | Out-File $out
+          $files = Get-ChildItem target\release\
           foreach ($f in $files) {
             $h = Get-FileHash $f.FullName -Algorithm SHA256
             "$($h.Hash)  $($f.Name)" | Out-File $out -Append
           }
 
-      # -------------------------
-      # Artifact Packaging
-      # -------------------------
-      - name: Collect artifacts
+      # ---------------- Artifact Packaging ----------------
+      - name: Collect Artifacts
         run: |
           mkdir -p out
           cp -r target/release out/ || true
-          cp -r proof out/ || true
+          cp -r proof out/
           cp README.md out/ || true
 
-      - name: Upload artifact
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: user-order-${{ matrix.os }}
           path: out/
 
-  # ===========================================================
-  # 3) GitHub Release
-  # ===========================================================
+  # -----------------------------------------------------------
+  # 3) Create Release
+  # -----------------------------------------------------------
   release:
     needs: [versioning, build]
     if: needs.versioning.outputs.exists == 'false'
@@ -131,40 +128,41 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download all artifacts
+      - name: Download built artifacts
         uses: actions/download-artifact@v4
         with:
           path: release/
 
-      - name: Create GitHub Release
+      - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.versioning.outputs.new_tag }}
           name: "User-can-designate-order ${{ needs.versioning.outputs.new_tag }}"
           body: |
-            ## Auto Release — User-defined Execution Order Module
-            - Tag: **${{ needs.versioning.outputs.new_tag }}**
-            - Commit: `${{ github.sha }}`
-            - 3OS Auto Build
-            - Includes ProofLedger + SHA256 + Binaries
+            ## User-can-designate-order Auto Release
+            - **Tag:** ${{ needs.versioning.outputs.new_tag }}
+            - **Commit:** `${{ github.sha }}`
+            - 3OS Fully Automatic Build
+            - Includes ProofLedger & SHA256
+            - Meaning Graph Order Module (stable)
           files: |
-            release/**
+            release/**/*
 
       - name: Summary
         run: |
           echo "### Release Completed" >> $GITHUB_STEP_SUMMARY
-          echo "Tag: ${{ needs.versioning.outputs.new_tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Tag: ${{ needs.versioning.outputs.new_tag }}" >> $GITHUB_STEP_SUMMARY
 
-  # ===========================================================
-  # 4) Release-Skip (중복된 태그 존재)
-  # ===========================================================
+  # -----------------------------------------------------------
+  # 4) Release skip (tag duplicated)
+  # -----------------------------------------------------------
   release_skip:
     needs: versioning
     if: needs.versioning.outputs.exists == 'true'
     runs-on: ubuntu-latest
-
     steps:
       - name: Summary
         run: |
           echo "### ⚠ Release Skipped" >> $GITHUB_STEP_SUMMARY
           echo "Reason: Tag already exists" >> $GITHUB_STEP_SUMMARY
+
