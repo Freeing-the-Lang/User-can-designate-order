@@ -1,0 +1,170 @@
+name: User-Order-Module Auto Release (3OS)
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: user-order-module
+  cancel-in-progress: false
+
+jobs:
+  # ===========================================================
+  # 1) 버전 태그 생성 + 중복 검사
+  # ===========================================================
+  versioning:
+    runs-on: ubuntu-latest
+    outputs:
+      new_tag: ${{ steps.tag.outputs.tag }}
+      exists: ${{ steps.check.outputs.exists }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate version tag
+        id: tag
+        run: |
+          DATE=$(date +"%Y%m%d%H%M%S")
+          TAG="v0.1.${DATE}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Check if tag already exists
+        id: check
+        run: |
+          TAG=${{ steps.tag.outputs.tag }}
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  # ===========================================================
+  # 2) Rust 3OS Build
+  # ===========================================================
+  build:
+    needs: versioning
+    if: needs.versioning.outputs.exists == 'false'
+
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+      fail-fast: false
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: actions/setup-rust@v1
+        with:
+          rust-version: stable
+
+      - name: Build (Release)
+        run: cargo build --release
+
+      - name: Run Tests
+        run: cargo test --verbose
+
+      # -------------------------
+      # Proof Metadata + SHA256
+      # -------------------------
+      - name: Prepare proof ledger
+        run: |
+          mkdir -p proof
+          echo "User-can-designate-order Proof" > proof/PROOF-${{ matrix.os }}.txt
+          echo "Tag: ${{ needs.versioning.outputs.new_tag }}" >> proof/PROOF-${{ matrix.os }}.txt
+          echo "OS: ${{ matrix.os }}" >> proof/PROOF-${{ matrix.os }}.txt
+          echo "Commit: $GITHUB_SHA" >> proof/PROOF-${{ matrix.os }}.txt
+          echo "Build-Time: $(date)" >> proof/PROOF-${{ matrix.os }}.txt
+
+      - name: SHA256 checksum
+        shell: bash
+        if: matrix.os != 'windows-latest'
+        run: |
+          echo "SHA256 Checksum" > proof/SHA256-${{ matrix.os }}.txt
+          sha256sum target/release/* >> proof/SHA256-${{ matrix.os }}.txt
+
+      - name: SHA256 checksum (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path proof | Out-Null
+          $files = Get-ChildItem target\release\
+          $out = "proof\SHA256-windows.txt"
+          "" | Out-File $out
+          foreach ($f in $files) {
+            $h = Get-FileHash $f.FullName -Algorithm SHA256
+            "$($h.Hash)  $($f.Name)" | Out-File $out -Append
+          }
+
+      # -------------------------
+      # Artifact Packaging
+      # -------------------------
+      - name: Collect artifacts
+        run: |
+          mkdir -p out
+          cp -r target/release out/ || true
+          cp -r proof out/ || true
+          cp README.md out/ || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: user-order-${{ matrix.os }}
+          path: out/
+
+  # ===========================================================
+  # 3) GitHub Release
+  # ===========================================================
+  release:
+    needs: [versioning, build]
+    if: needs.versioning.outputs.exists == 'false'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.versioning.outputs.new_tag }}
+          name: "User-can-designate-order ${{ needs.versioning.outputs.new_tag }}"
+          body: |
+            ## Auto Release — User-defined Execution Order Module
+            - Tag: **${{ needs.versioning.outputs.new_tag }}**
+            - Commit: `${{ github.sha }}`
+            - 3OS Auto Build
+            - Includes ProofLedger + SHA256 + Binaries
+          files: |
+            release/**
+
+      - name: Summary
+        run: |
+          echo "### Release Completed" >> $GITHUB_STEP_SUMMARY
+          echo "Tag: ${{ needs.versioning.outputs.new_tag }}" >> $GITHUB_STEP_SUMMARY
+
+  # ===========================================================
+  # 4) Release-Skip (중복된 태그 존재)
+  # ===========================================================
+  release_skip:
+    needs: versioning
+    if: needs.versioning.outputs.exists == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Summary
+        run: |
+          echo "### ⚠ Release Skipped" >> $GITHUB_STEP_SUMMARY
+          echo "Reason: Tag already exists" >> $GITHUB_STEP_SUMMARY
