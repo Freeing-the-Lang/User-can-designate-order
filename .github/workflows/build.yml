@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   # -----------------------------------------------------------
-  # 1) Version Tag (unique, safe, duplicate-check)
+  # 1) Tag 생성 + 중복 검사
   # -----------------------------------------------------------
   versioning:
     runs-on: ubuntu-latest
@@ -25,14 +25,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Generate stable tag
+      - name: Generate unique version tag
         id: tag
         run: |
           DATE=$(date +"%Y%m%d%H%M%S%N")
           TAG="v0.1.${DATE}"
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
-      - name: Check tag duplication
+      - name: Check if tag already exists
         id: check
         env:
           GH_TOKEN: ${{ github.token }}
@@ -45,7 +45,7 @@ jobs:
           fi
 
   # -----------------------------------------------------------
-  # 2) Rust 3OS Build (Stable)
+  # 2) Rust 빌드 (3OS)
   # -----------------------------------------------------------
   build:
     needs: versioning
@@ -61,19 +61,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ---------- Rust 설치 (최강 안정 버전) ----------
       - name: Setup Rust
-        uses: rust-lang/setup-rust@v1.8.0
-        with:
-          rust-version: stable
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Cargo Build (Release + Locked)
+      # ---------- Build + Test ----------
+      - name: Cargo Build
         run: cargo build --release --locked
 
       - name: Cargo Test
         run: cargo test --locked
 
-      # ---------------- Proof Ledger ----------------
-      - name: Generate ProofLedger
+      # ---------- Proof Ledger ----------
+      - name: Generate Proof Ledger
         run: |
           mkdir -p proof
           echo "User-can-designate-order Proof Ledger" > proof/PROOF-${{ matrix.os }}.txt
@@ -82,15 +82,15 @@ jobs:
           echo "Commit: $GITHUB_SHA" >> proof/PROOF-${{ matrix.os }}.txt
           echo "Build-Time: $(date)" >> proof/PROOF-${{ matrix.os }}.txt
 
-      # ---------------- SHA256 Linux/macOS ----------------
-      - name: SHA256 checksum (Unix)
+      # ---------- SHA256 (Linux/macOS) ----------
+      - name: SHA256 Unix
         if: matrix.os != 'windows-latest'
         run: |
-          echo "SHA256 Checksum" > proof/SHA256-${{ matrix.os }}.txt
+          echo "SHA256 Checksums" > proof/SHA256-${{ matrix.os }}.txt
           sha256sum target/release/* >> proof/SHA256-${{ matrix.os }}.txt
 
-      # ---------------- SHA256 Windows ----------------
-      - name: SHA256 checksum (Windows)
+      # ---------- SHA256 (Windows) ----------
+      - name: SHA256 Windows
         if: matrix.os == 'windows-latest'
         shell: powershell
         run: |
@@ -103,11 +103,11 @@ jobs:
             "$($h.Hash)  $($f.Name)" | Out-File $out -Append
           }
 
-      # ---------------- Artifact Packaging ----------------
-      - name: Collect Artifacts
+      # ---------- Collect Artifacts ----------
+      - name: Package Artifacts
         run: |
           mkdir -p out
-          cp -r target/release out/ || true
+          cp -r target/release out/
           cp -r proof out/
           cp README.md out/ || true
 
@@ -118,7 +118,7 @@ jobs:
           path: out/
 
   # -----------------------------------------------------------
-  # 3) Create Release
+  # 3) Release 생성
   # -----------------------------------------------------------
   release:
     needs: [versioning, build]
@@ -128,23 +128,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download built artifacts
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: release/
 
-      - name: Create Release
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.versioning.outputs.new_tag }}
           name: "User-can-designate-order ${{ needs.versioning.outputs.new_tag }}"
           body: |
-            ## User-can-designate-order Auto Release
-            - **Tag:** ${{ needs.versioning.outputs.new_tag }}
-            - **Commit:** `${{ github.sha }}`
-            - 3OS Fully Automatic Build
-            - Includes ProofLedger & SHA256
-            - Meaning Graph Order Module (stable)
+            ## Auto Release — User Execution Order Module
+            - Tag: **${{ needs.versioning.outputs.new_tag }}**
+            - Commit: `${{ github.sha }}`
+            - 3OS build complete
+            - ProofLedger + SHA256 included
           files: |
             release/**/*
 
@@ -154,7 +153,7 @@ jobs:
           echo "- Tag: ${{ needs.versioning.outputs.new_tag }}" >> $GITHUB_STEP_SUMMARY
 
   # -----------------------------------------------------------
-  # 4) Release skip (tag duplicated)
+  # 4) 중복 태그 → Release skip
   # -----------------------------------------------------------
   release_skip:
     needs: versioning
@@ -165,4 +164,3 @@ jobs:
         run: |
           echo "### ⚠ Release Skipped" >> $GITHUB_STEP_SUMMARY
           echo "Reason: Tag already exists" >> $GITHUB_STEP_SUMMARY
-
