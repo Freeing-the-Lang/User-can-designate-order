@@ -1,4 +1,4 @@
-name: User-Order-Build
+name: User-Order Full Auto Release
 
 on:
   push:
@@ -8,8 +8,50 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: user-order-release
+  cancel-in-progress: false
+
 jobs:
+  # =======================================================
+  # TAG 생성 + 중복 체크
+  # =======================================================
+  versioning:
+    runs-on: ubuntu-latest
+    outputs:
+      new_tag: ${{ steps.tag.outputs.tag }}
+      exists: ${{ steps.check.outputs.exists }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate Tag
+        id: tag
+        run: |
+          DATE=$(date +"%Y%m%d%H%M")
+          TAG="v0.1.${DATE}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Check if tag already exists
+        id: check
+        run: |
+          TAG=${{ steps.tag.outputs.tag }}
+          EXIST=$(gh release view "$TAG" --json tagName --jq '.tagName' 2>/dev/null || true)
+          if [ "$EXIST" = "$TAG" ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  # =======================================================
+  # 3OS 빌드 (Tag 없을 때만 진행)
+  # =======================================================
   build:
+    needs: versioning
+    if: ${{ needs.versioning.outputs.exists == 'false' }}
     runs-on: ${{ matrix.os }}
 
     strategy:
@@ -24,36 +66,37 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      # -------------------------
+      # ---------------------------------------
       # Build
-      # -------------------------
+      # ---------------------------------------
       - name: Cargo Build
         run: cargo build --release
 
-      # -------------------------
-      # Proof / Metadata
-      # -------------------------
+      # ---------------------------------------
+      # Proof
+      # ---------------------------------------
       - name: Prepare proof
         run: |
           mkdir -p proof
-          echo "User-can-designate-order Build-Proof" > proof/PROOF-${{ matrix.os }}.txt
-          echo "Build-OS = ${{ matrix.os }}" >> proof/PROOF-${{ matrix.os }}.txt
-          echo "Commit   = $GITHUB_SHA" >> proof/PROOF-${{ matrix.os }}.txt
-          echo "BuildAt  = $(date)" >> proof/PROOF-${{ matrix.os }}.txt
+          echo "User-can-designate-order Build Proof" > proof/PROOF-${{ matrix.os }}.txt
+          echo "Tag = ${{ needs.versioning.outputs.new_tag }}" >> proof/PROOF-${{ matrix.os }}.txt
+          echo "Commit = $GITHUB_SHA" >> proof/PROOF-${{ matrix.os }}.txt
+          echo "Build OS = ${{ matrix.os }}" >> proof/PROOF-${{ matrix.os }}.txt
+          echo "Build Time = $(date)" >> proof/PROOF-${{ matrix.os }}.txt
 
-      # -------------------------
-      # SHA256 (Unix)
-      # -------------------------
-      - name: SHA256 Unix
+      # ---------------------------------------
+      # SHA256 (Linux/macOS)
+      # ---------------------------------------
+      - name: SHA256 (Unix)
         if: matrix.os != 'windows-latest'
         run: |
           echo "SHA256 Checksums" > proof/SHA256-${{ matrix.os }}.txt
           find target/release -maxdepth 1 -type f -exec sha256sum {} \; >> proof/SHA256-${{ matrix.os }}.txt
 
-      # -------------------------
+      # ---------------------------------------
       # SHA256 (Windows)
-      # -------------------------
-      - name: SHA256 Windows
+      # ---------------------------------------
+      - name: SHA256 (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
@@ -62,23 +105,70 @@ jobs:
           $out = "../../proof/SHA256-windows-latest.txt"
           "SHA256 Checksums (Windows)" | Out-File $out -Encoding utf8
           foreach ($f in $list) {
-            $hash = (Get-FileHash $f.FullName -Algorithm SHA256).Hash
-            "$hash  $($f.Name)" | Out-File $out -Append -Encoding utf8
+            $h = (Get-FileHash $f.FullName -Algorithm SHA256).Hash
+            "$h  $($f.Name)" | Out-File $out -Append -Encoding utf8
           }
 
-      # -------------------------
+      # ---------------------------------------
       # Collect Artifacts
-      # -------------------------
-      - name: Collect Artifacts
+      # ---------------------------------------
+      - name: Collect out/
         run: |
           mkdir -p out
-          cp -r target/release out/ || true
-          cp -r proof out/ || true
-          cp README.md out/ || true
+          cp -r target/release out/
+          cp -r proof out/
+          cp README.md out/
 
-      - name: Upload
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: user-order-${{ matrix.os }}
           path: out/
+
+  # =======================================================
+  # 릴리즈 생성
+  # =======================================================
+  release:
+    needs: [versioning, build]
+    if: ${{ needs.versioning.outputs.exists == 'false' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.versioning.outputs.new_tag }}
+          name: "User-Order Release ${{ needs.versioning.outputs.new_tag }}"
+          body: |
+            ## User-can-designate-order Auto Release
+            - Tag: `${{ needs.versioning.outputs.new_tag }}`
+            - Commit: `${{ github.sha }}`
+            - 3-OS Build Completed
+            - Includes:
+              - Rust binaries
+              - Proof files
+              - SHA256 checksums
+              - MultiMain-Order module artifacts
+
+          files: release/**
+
+  # =======================================================
+  # 태그 중복 → 생략 메시지
+  # =======================================================
+  skip:
+    needs: versioning
+    if: ${{ needs.versioning.outputs.exists == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "Tag already exists → release skipped" >> $GITHUB_STEP_SUMMARY
+
 
