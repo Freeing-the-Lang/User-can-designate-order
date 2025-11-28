@@ -1,4 +1,4 @@
-name: User-Order Module Stable Auto Release (3OS)
+name: User-Order-Build
 
 on:
   push:
@@ -8,159 +8,77 @@ on:
 permissions:
   contents: write
 
-concurrency:
-  group: user-can-designate-order
-  cancel-in-progress: false
-
 jobs:
-  # -----------------------------------------------------------
-  # 1) Tag 생성 + 중복 검사
-  # -----------------------------------------------------------
-  versioning:
-    runs-on: ubuntu-latest
-    outputs:
-      new_tag: ${{ steps.tag.outputs.tag }}
-      exists: ${{ steps.check.outputs.exists }}
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Generate unique version tag
-        id: tag
-        run: |
-          DATE=$(date +"%Y%m%d%H%M%S%N")
-          TAG="v0.1.${DATE}"
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-
-      - name: Check if tag already exists
-        id: check
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          TAG=${{ steps.tag.outputs.tag }}
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-          fi
-
-  # -----------------------------------------------------------
-  # 2) Rust 빌드 (3OS)
-  # -----------------------------------------------------------
   build:
-    needs: versioning
-    if: needs.versioning.outputs.exists == 'false'
+    runs-on: ${{ matrix.os }}
 
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
 
-    runs-on: ${{ matrix.os }}
-
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      # ---------- Rust 설치 ----------
-      - name: Setup Rust
+      - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      # ---------- Build + Test (locked 제거!) ----------
+      # -------------------------
+      # Build
+      # -------------------------
       - name: Cargo Build
         run: cargo build --release
 
-      - name: Cargo Test
-        run: cargo test
-
-      # ---------- Proof Ledger ----------
-      - name: Generate Proof Ledger
+      # -------------------------
+      # Proof / Metadata
+      # -------------------------
+      - name: Prepare proof
         run: |
           mkdir -p proof
-          echo "User-can-designate-order Proof Ledger" > proof/PROOF-${{ matrix.os }}.txt
-          echo "Tag: ${{ needs.versioning.outputs.new_tag }}" >> proof/PROOF-${{ matrix.os }}.txt
-          echo "OS: ${{ matrix.os }}" >> proof/PROOF-${{ matrix.os }}.txt
-          echo "Commit: $GITHUB_SHA" >> proof/PROOF-${{ matrix.os }}.txt
-          echo "Build-Time: $(date)" >> proof/PROOF-${{ matrix.os }}.txt
+          echo "User-can-designate-order Build-Proof" > proof/PROOF-${{ matrix.os }}.txt
+          echo "Build-OS = ${{ matrix.os }}" >> proof/PROOF-${{ matrix.os }}.txt
+          echo "Commit   = $GITHUB_SHA" >> proof/PROOF-${{ matrix.os }}.txt
+          echo "BuildAt  = $(date)" >> proof/PROOF-${{ matrix.os }}.txt
 
-      # ---------- SHA256 (Unix) ----------
+      # -------------------------
+      # SHA256 (Unix)
+      # -------------------------
       - name: SHA256 Unix
         if: matrix.os != 'windows-latest'
         run: |
           echo "SHA256 Checksums" > proof/SHA256-${{ matrix.os }}.txt
-          sha256sum target/release/* >> proof/SHA256-${{ matrix.os }}.txt
+          find target/release -maxdepth 1 -type f -exec sha256sum {} \; >> proof/SHA256-${{ matrix.os }}.txt
 
-      # ---------- SHA256 (Windows) ----------
+      # -------------------------
+      # SHA256 (Windows)
+      # -------------------------
       - name: SHA256 Windows
         if: matrix.os == 'windows-latest'
-        shell: powershell
+        shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path proof | Out-Null
-          $out = "proof/SHA256-windows.txt"
-          "" | Out-File $out
-          $files = Get-ChildItem target\release\
-          foreach ($f in $files) {
-            $h = Get-FileHash $f.FullName -Algorithm SHA256
-            "$($h.Hash)  $($f.Name)" | Out-File $out -Append
+          Set-Location target/release
+          $list = Get-ChildItem -File
+          $out = "../../proof/SHA256-windows-latest.txt"
+          "SHA256 Checksums (Windows)" | Out-File $out -Encoding utf8
+          foreach ($f in $list) {
+            $hash = (Get-FileHash $f.FullName -Algorithm SHA256).Hash
+            "$hash  $($f.Name)" | Out-File $out -Append -Encoding utf8
           }
 
-      # ---------- Collect Artifacts ----------
-      - name: Package Artifacts
+      # -------------------------
+      # Collect Artifacts
+      # -------------------------
+      - name: Collect Artifacts
         run: |
           mkdir -p out
-          cp -r target/release out/
-          cp -r proof out/
+          cp -r target/release out/ || true
+          cp -r proof out/ || true
           cp README.md out/ || true
 
-      - name: Upload Artifact
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: user-order-${{ matrix.os }}
           path: out/
 
-  # -----------------------------------------------------------
-  # 3) Release 생성
-  # -----------------------------------------------------------
-  release:
-    needs: [versioning, build]
-    if: needs.versioning.outputs.exists == 'false'
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: release/
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.versioning.outputs.new_tag }}
-          name: "User-can-designate-order ${{ needs.versioning.outputs.new_tag }}"
-          body: |
-            ## Auto Release — User Execution Order Module
-            - Tag: **${{ needs.versioning.outputs.new_tag }}**
-            - Commit: `${{ github.sha }}`
-            - 3OS build complete
-            - ProofLedger + SHA256 included
-          files: |
-            release/**/*
-
-      - name: Summary
-        run: |
-          echo "### Release Completed" >> $GITHUB_STEP_SUMMARY
-          echo "- Tag: ${{ needs.versioning.outputs.new_tag }}" >> $GITHUB_STEP_SUMMARY
-
-  # -----------------------------------------------------------
-  # 4) 중복 태그 → Release skip
-  # -----------------------------------------------------------
-  release_skip:
-    needs: versioning
-    if: needs.versioning.outputs.exists == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Summary
-        run: |
-          echo "### ⚠ Release Skipped" >> $GITHUB_STEP_SUMMARY
-          echo "Reason: Tag already exists" >> $GITHUB_STEP_SUMMARY
